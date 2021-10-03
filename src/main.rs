@@ -21,6 +21,10 @@ struct ABuildTesterConfig {
 }
 */
 fn main() {
+    let (tx, rx) = channel();
+    let tx_clone = tx.clone();
+        ctrlc::set_handler(move || tx_clone.send("ctrlc").expect("Could not send signal on channel."))
+            .expect("Error setting Ctrl-C handler");
     /*
     let opts = ABuildTesterConfig::from_args();
     //let mut orig_dir = env::current_dir().unwrap();
@@ -62,50 +66,46 @@ fn main() {
         let path = directory.unwrap().path();
         if !completed_packages.contains(&path.file_name().unwrap().to_str().unwrap().to_string()) {
             env::set_current_dir(path.clone()).expect(format!("Unable to change directory to {}", path.clone().display()).as_str());
-            let (tx, rx) = channel();
-            let tx_clone = tx.clone();
-            ctrlc::set_handler(move || tx_clone.send("ctrlc").expect("Could not send signal on channel."))
-                .expect("Error setting Ctrl-C handler");
+            let mut child = Command::new("abuild").arg("-R").stdout(Stdio::inherit()).stderr(Stdio::inherit()).stdin(Stdio::inherit()).spawn().expect(format!("Error spawning abuild -R for package '{}'", path.file_name().unwrap().to_str().unwrap()).as_str());
+            let child_id = child.id() as i32;
             let (tx2, rx2) = channel();
-            let mut works = false;
+            let tx_clone2 = tx.clone();
+            let tx2_clone = tx2.clone();
+            std::thread::spawn(move || {
+                tx2_clone.send(child.wait().expect("abuild not running").success()).unwrap();
+                tx_clone2.send("done").unwrap();
+            });
+            //let mut works = false;
             if Path::new("./APKBUILD").exists() {
-                
-                let mut child = Command::new("abuild").arg("-R").stdout(Stdio::inherit()).stderr(Stdio::inherit()).stdin(Stdio::inherit()).spawn().expect(format!("Error spawning abuild -R for package '{}'", path.file_name().unwrap().to_str().unwrap()).as_str());
-                
-                let child_id = child.id() as i32;
-                std::thread::spawn(move || {
-                    let mut status = match rx.try_recv() {
+                let mut status = match rx.try_recv() {
+                    Ok(rx) => rx,
+                    Err(TryRecvError::Empty) => "empty",
+                    Err(TryRecvError::Disconnected) => "disconnected", 
+                };
+                while status != "ctrlc" && status != "done" {
+                    status = match rx.try_recv() {
                         Ok(rx) => rx,
                         Err(TryRecvError::Empty) => "empty",
-                        Err(TryRecvError::Disconnected) => "disconnected", 
+                        Err(TryRecvError::Disconnected) => "disconnected",
                     };
-                    while status != "ctrlc" && status != "done" {
-                        status = match rx.try_recv() {
-                            Ok(rx) => rx,
-                            Err(TryRecvError::Empty) => "empty",
-                            Err(TryRecvError::Disconnected) => "disconnected",
-                        };
-                    }
-                    if status == "ctrlc" {
-                        tx2.send("quit").unwrap();
-                        nix::sys::signal::kill(
-                            nix::unistd::Pid::from_raw(child_id), 
-                            nix::sys::signal::Signal::SIGINT
-                        ).expect("cannot send ctrl-c");
-                    } else {
-                        tx2.send("continue").unwrap();
-                    }
-                });
-                
-                works = child.wait().expect("abuild not running").success();
-                tx.send("done").unwrap();
-                let status = rx2.recv().unwrap();
-                if status == "quit" {
-                    return;
                 }
+                if status == "ctrlc" {
+                    //tx2.send("quit").unwrap();
+                    nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(child_id), 
+                        nix::sys::signal::Signal::SIGINT
+                    ).expect("cannot send ctrl-c");
+                    return
+                }
+
+                //let status = rx2.recv().unwrap();
+                //if status == "quit" {
+                //    return;
+                //}
                 
             }
             let out_string: String;
+            let works = rx2.recv().unwrap();
             if works {
                 out_string = "PASS".to_string();
             } else {
